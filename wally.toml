@@ -1,0 +1,14 @@
+[package]
+name = "thehehfocus/signal-x"
+description = "Fastest I could get a signal working."
+
+authors = ["thehehfocus"]
+
+license = "MIT"
+version = "0.1.65"
+registry = "https://github.com/UpliftGames/wally-index"
+
+realm = "shared"
+exclude = ["rokit.toml", ".vscode"]
+
+[dependencies]

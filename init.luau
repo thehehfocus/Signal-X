@@ -66,19 +66,24 @@ const coroutinerunning = coroutine.running
 const coroutineyield = coroutine.yield
 const coroutinestatus = coroutine.status
 const tableinsert = table.insert
+const sync = task.synchronize
+const desync = task.desynchronize
 
 -- Pool
 const Threads = {} :: {thread}
+@native
 const function ReuseCall(Thread, Callback, ...)
 	Callback(...)
 	tableinsert(Threads, Thread)
 end
+@native
 const function ReuseThread()
 	while true do
 		ReuseCall(coroutineyield())
 	end
 end
 
+@native
 const function Disconnect(Connection: InternalConnection)
 	if not Connection.Connected then return end
 	Connection.Connected = nil
@@ -118,6 +123,7 @@ SignalClass.__tostring = function(Signal: InternalSignal)
 end
 
 -- Uses task.spawn to fire the callbacks, immediate
+@native
 function SignalClass.Fire(Signal: InternalSignal, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -136,6 +142,7 @@ function SignalClass.Fire(Signal: InternalSignal, ...)
 end
 
 -- Uses task.defer to fire the callbacks, fires last in the frame
+@native
 function SignalClass.FireDeferred(Signal: InternalSignal, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -154,6 +161,7 @@ function SignalClass.FireDeferred(Signal: InternalSignal, ...)
 end
 
 -- May be fastest fire function, less safe, uses coroutine.resume
+@native
 function SignalClass.FireCorout(Signal: InternalSignal, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -179,7 +187,8 @@ const function _safecall(Connection: InternalConnection, ErrorHandler, ...)
 		ErrorHandler(Error, Connection)
 	end or _errhandler, ...)
 end
--- Wraps callbacks in an xpcall, slower
+-- Wraps callbacks in an xpcall
+@native
 function SignalClass.FireSafe(Signal: InternalSignal, ErrorHandler: ()->()?, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -198,6 +207,7 @@ function SignalClass.FireSafe(Signal: InternalSignal, ErrorHandler: ()->()?, ...
 end
 
 -- Fires all callbacks in a single thread, simplest and fastest if none yield, a.k.a. uses task.wait()
+@native
 function SignalClass.FireSync(Signal: InternalSignal, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -212,6 +222,7 @@ const function _latefire(Signal: InternalSignal, ...)
 	Signal:Fire(...)
 end
 -- Fires all callbacks after a frame
+@native
 function SignalClass.FireLate(Signal: InternalSignal, ...)
 	local len = #Threads
 	if len == 0 then
@@ -225,7 +236,8 @@ function SignalClass.FireLate(Signal: InternalSignal, ...)
 	end
 end
 
--- Avoiding table indexing and allowing inlining
+-- Avoiding table indexing and allowing inlining by making function local
+@native
 const function Connect(Signal: InternalSignal, Callback) : InternalConnection
 	local Head = Signal.Head
 
@@ -257,6 +269,14 @@ function SignalClass.Once(Signal: InternalSignal, Callback)
 	end)
 
 	return Connection
+end
+
+function SignalClass.ConnectParallel(Signal: InternalSignal, Callback)
+	return Connect(Signal, function(...)
+		desync()
+		Callback(...)
+		sync()
+	end)
 end
 
 function SignalClass.Wait(Signal: InternalSignal)
