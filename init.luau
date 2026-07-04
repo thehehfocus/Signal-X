@@ -1,43 +1,31 @@
 --[[
 MIT License
-
-Copyright (c) 2026 OutOfFocus
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+By OutOfFocus (thehehfocus)
 --]]
 
 --!optimize 2
 --!strict
 export type Signal<Params...> = {
+	--[[ Properties ]]--
 	Id: any,
 
+	--[[ Connect operations ]]--
 	Connect: (self: Signal<Params...>, Callback: (Params...) -> ()) -> Connection,
+	ConnectParallel: (self: Signal<Params...>, Callback: (Params...) -> ()) -> Connection,
 	Once: (self: Signal<Params...>, Callback: (Params...) -> ()) -> Connection,
 	Wait: (self: Signal<Params...>) -> Params...,
 
+	--[[ Fire operations ]]--
 	Fire: (self: Signal<Params...>, Params...) -> (),
 	FireSync: (self: Signal<Params...>, Params...) -> (),
 	FireDeferred: (self: Signal<Params...>, Params...) -> (),
 	FireLate: (self: Signal<Params...>, Params...) -> (),
 	FireCorout: (self: Signal<Params...>, Params...) -> (),
-	FireSafe: (self: Signal<Params...>, ErrorHandler: (Error: string, Connection: Connection)->()?, Params...) -> (),
+	FireProtected: (self: Signal<Params...>, ErrorHandler: (Error: string, Connection: Connection)->(), Params...) -> (),
 
+	--[[ Utilities ]]--
+	SetId: (self: Signal<Params...>, Id: any) -> (),
+	GetConnections: (self: Signal<Params...>) -> {Connection},
 	DisconnectAll: (self: Signal<Params...>) -> (),
 	Destroy: (self: Signal<Params...>) -> (),
 }
@@ -55,40 +43,40 @@ type InternalConnection = {
 	-- [1] Prev: InternalConnection?,
 	-- [2] Next: InternalConnection?,
 	-- [3] Callback: (...any)->(),
-} & Connection
+	-- [4] Connected: boolean?,
+	-- [5] Signal: InternalSignal,
+	[number]: any
+}
 
 -- Getting globals
 const taskspawn = task.spawn
 const taskdefer = task.defer
+const sync = task.synchronize
+const desync = task.desynchronize
 const coroutinecreate = coroutine.create
 const coroutineresume = coroutine.resume
 const coroutinerunning = coroutine.running
 const coroutineyield = coroutine.yield
 const coroutinestatus = coroutine.status
 const tableinsert = table.insert
-const sync = task.synchronize
-const desync = task.desynchronize
 
 -- Pool
 const Threads = {} :: {thread}
-@native
 const function ReuseCall(Thread, Callback, ...)
 	Callback(...)
 	tableinsert(Threads, Thread)
 end
-@native
 const function ReuseThread()
 	while true do
 		ReuseCall(coroutineyield())
 	end
 end
 
-@native
 const function Disconnect(Connection: InternalConnection)
-	if not Connection.Connected then return end
-	Connection.Connected = nil
+	if not Connection[4] then return end
+	Connection[4] = nil
 
-	local Signal = Connection.Signal
+	local Signal = Connection[5]
 	local Prev = Connection[1] :: InternalConnection?
 	local Next = Connection[2] :: InternalConnection?
 
@@ -116,14 +104,13 @@ SignalClass.__tostring = function(Signal: InternalSignal)
 	SignalClass.__tostring = __tostring
 
 	if Signal.Id then
-		return `SignalX [{Signal.Id}] {address}`
+		return `(SignalX, id: {Signal.Id}, {address})`
 	else
-		return "SignalX, " .. address
+		return "(SignalX, " .. address .. ")"
 	end
 end
 
 -- Uses task.spawn to fire the callbacks, immediate
-@native
 function SignalClass.Fire(Signal: InternalSignal, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -142,7 +129,6 @@ function SignalClass.Fire(Signal: InternalSignal, ...)
 end
 
 -- Uses task.defer to fire the callbacks, fires last in the frame
-@native
 function SignalClass.FireDeferred(Signal: InternalSignal, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -161,7 +147,6 @@ function SignalClass.FireDeferred(Signal: InternalSignal, ...)
 end
 
 -- May be fastest fire function, less safe, uses coroutine.resume
-@native
 function SignalClass.FireCorout(Signal: InternalSignal, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -179,35 +164,33 @@ function SignalClass.FireCorout(Signal: InternalSignal, ...)
 	end
 end
 
-const function _errhandler(Error)
+const function errHandler(Error)
 	warn(`Error calling callback: {Error or "unknown error"}`)
 end
-const function _safecall(Connection: InternalConnection, ErrorHandler, ...)
+const function safeCall(Connection: InternalConnection, ErrorHandler, ...)
 	xpcall(Connection[3], ErrorHandler and function(Error)
 		ErrorHandler(Error, Connection)
-	end or _errhandler, ...)
+	end or errHandler, ...)
 end
 -- Wraps callbacks in an xpcall
-@native
-function SignalClass.FireSafe(Signal: InternalSignal, ErrorHandler: ()->()?, ...)
+function SignalClass.FireProtected(Signal: InternalSignal, ErrorHandler: ()->(), ...)
 	local Pointer = Signal.Tail
 	while Pointer do
 		local len = #Threads
 		if len == 0 then
 			local Thread = coroutinecreate(ReuseThread)
 			coroutineresume(Thread)
-			taskspawn(Thread, Thread, _safecall, Pointer, ErrorHandler, ...)
+			taskspawn(Thread, Thread, safeCall, Pointer, ErrorHandler, ...)
 		else
 			local Thread = Threads[len]
 			Threads[len] = nil
-			taskspawn(Thread, Thread, _safecall, Pointer, ErrorHandler, ...)
+			taskspawn(Thread, Thread, safeCall, Pointer, ErrorHandler, ...)
 		end
 		Pointer = Pointer[2]
 	end
 end
 
 -- Fires all callbacks in a single thread, simplest and fastest if none yield, a.k.a. uses task.wait()
-@native
 function SignalClass.FireSync(Signal: InternalSignal, ...)
 	local Pointer = Signal.Tail
 	while Pointer do
@@ -217,38 +200,41 @@ function SignalClass.FireSync(Signal: InternalSignal, ...)
 	end
 end
 
-const function _latefire(Signal: InternalSignal, ...)
+const function lateFire(Signal: InternalSignal, ...)
 	task.wait()
 	Signal:Fire(...)
 end
 -- Fires all callbacks after a frame
-@native
 function SignalClass.FireLate(Signal: InternalSignal, ...)
 	local len = #Threads
 	if len == 0 then
 		local Thread = coroutinecreate(ReuseThread)
 		coroutineresume(Thread)
-		taskspawn(Thread, Thread, _latefire, Signal, ...)
+		taskspawn(Thread, Thread, lateFire, Signal, ...)
 	else
 		local Thread = Threads[len]
 		Threads[len] = nil
-		taskspawn(Thread, Thread, _latefire, Signal, ...)
+		taskspawn(Thread, Thread, lateFire, Signal, ...)
 	end
 end
 
--- Avoiding table indexing and allowing inlining by making function local
-@native
+local ConnectionClass = {
+	Connected = function(self: InternalConnection) return self[4] end,
+	Signal = function(self: InternalConnection) return self[5] end,
+	Disconnect = Disconnect,
+}
+ConnectionClass.__index = ConnectionClass
+
 const function Connect(Signal: InternalSignal, Callback) : InternalConnection
 	local Head = Signal.Head
 
-	local Connection = {
+	local Connection = setmetatable({
 		[1] = Head,
+		[2] = nil,
 		[3] = Callback,
-
-		Connected = true,
-		Signal = Signal,
-		Disconnect = Disconnect,
-	} :: InternalConnection
+		[4] = true,
+		[5] = Signal,
+	}, ConnectionClass) :: InternalConnection
 
 	if Head then
 		Head[2] = Connection
@@ -293,10 +279,32 @@ function SignalClass.Wait(Signal: InternalSignal)
 	return coroutineyield()
 end
 
+function SignalClass.SetId(Signal: InternalSignal, Id: any)
+	local oldId = Signal.Id
+	if oldId and Storage[oldId] == Signal then
+		Storage[oldId] = nil
+	end
+
+	Signal.Id = Id
+	Storage[Id] = Signal
+end
+
+function SignalClass.GetConnections(Signal: InternalSignal)
+	local Connections = {}
+
+	local Pointer = Signal.Tail
+	while Pointer do
+		tableinsert(Connections, Pointer)
+		Pointer = Pointer[2]
+	end
+	
+	return Connections
+end
+
 function SignalClass.DisconnectAll(Signal: InternalSignal)
 	local Pointer = Signal.Tail
 	while Pointer do
-		Pointer.Connected = nil
+		Pointer[4] = nil
 		Pointer = Pointer[2]
 	end
 	Signal.Tail = nil
@@ -312,22 +320,36 @@ function SignalClass.Destroy(Signal: InternalSignal)
 	end
 end
 
-const function CreateSignal(Id: any)
-	local Signal = setmetatable({}, SignalClass) :: Signal<any>
+const function CreateSignal(Id: any) : Signal<...any>
+	local Signal = setmetatable({}, SignalClass)
 	if Id then
-		Storage[Id] = Signal
+		Storage[Id] = Signal :: any
 		Signal.Id = Id
 	end
-	return Signal
+	return Signal :: any
 end
 
-const function GetSignal(Id: any) : Signal<any>
+const function GetSignal(Id: any) : Signal<...any>
 	return Storage[Id]
 end
 
-return setmetatable({
-	new = CreateSignal,
-	get = GetSignal,
-}, {
-	__call = CreateSignal
-})
+local Module = {}
+Module.new = CreateSignal
+Module.get = GetSignal
+
+Module.Wrap = function<T...>(rbxSignal: RBXScriptSignal<T...>) : (Signal<T...>, Connection)
+	local Signal = CreateSignal()
+	return Signal, rbxSignal:Connect(function(...)
+		Signal:Fire(...)
+	end)
+end
+Module.Is = function(Signal: any) : Signal<...any>|false
+	return type(Signal) == "table" and getmetatable(Signal) == SignalClass and Signal
+end
+
+Module.SignalMT = SignalClass
+Module.ConnectionMT = ConnectionClass
+
+setmetatable(Module, {__call = Module.new})
+
+return Module
