@@ -1,26 +1,24 @@
 --[[
 MIT License
-By OutOfFocus (thehehfocus)
+By OutOfFocus (thehehfocus on github)
 --]]
 
 --!optimize 2
 --!strict
-export type Signal<Params...> = {
+export type Signal<Params... = ...any> = {
 	--[[ Properties ]]--
 	Id: any,
 
 	--[[ Connect operations ]]--
 	Connect: (self: Signal<Params...>, Callback: (Params...) -> ()) -> Connection,
-	ConnectParallel: (self: Signal<Params...>, Callback: (Params...) -> ()) -> Connection,
 	Once: (self: Signal<Params...>, Callback: (Params...) -> ()) -> Connection,
 	Wait: (self: Signal<Params...>) -> Params...,
+	FilteredWait: (self: Signal<Params...>, Filter: (Params...) -> boolean?) -> Params...,
 
 	--[[ Fire operations ]]--
 	Fire: (self: Signal<Params...>, Params...) -> (),
 	FireSync: (self: Signal<Params...>, Params...) -> (),
 	FireDeferred: (self: Signal<Params...>, Params...) -> (),
-	FireLate: (self: Signal<Params...>, Params...) -> (),
-	FireCorout: (self: Signal<Params...>, Params...) -> (),
 	FireProtected: (self: Signal<Params...>, ErrorHandler: (Error: string, Connection: Connection)->(), Params...) -> (),
 
 	--[[ Utilities ]]--
@@ -32,7 +30,7 @@ export type Signal<Params...> = {
 type InternalSignal = {
 	Head: InternalConnection?,
 	Tail: InternalConnection?,
-} & Signal<any>
+} & Signal
 
 export type Connection = {
 	Signal: InternalSignal,	
@@ -51,20 +49,17 @@ type InternalConnection = {
 -- Getting globals
 const taskspawn = task.spawn
 const taskdefer = task.defer
-const sync = task.synchronize
-const desync = task.desynchronize
 const coroutinecreate = coroutine.create
 const coroutineresume = coroutine.resume
 const coroutinerunning = coroutine.running
 const coroutineyield = coroutine.yield
 const coroutinestatus = coroutine.status
-const tableinsert = table.insert
 
 -- Pool
 const Threads = {} :: {thread}
 const function ReuseCall(Thread, Callback, ...)
 	Callback(...)
-	tableinsert(Threads, Thread)
+	table.insert(Threads, Thread)
 end
 const function ReuseThread()
 	while true do
@@ -93,7 +88,7 @@ const function Disconnect(Connection: InternalConnection)
 	end
 end
 
-const Storage = {} :: {[any]: Signal<any>}
+const Storage = {} :: {[any]: Signal}
 
 const SignalClass = {}
 SignalClass.__index = SignalClass
@@ -146,24 +141,6 @@ function SignalClass.FireDeferred(Signal: InternalSignal, ...)
 	end
 end
 
--- May be fastest fire function, less safe, uses coroutine.resume
-function SignalClass.FireCorout(Signal: InternalSignal, ...)
-	local Pointer = Signal.Tail
-	while Pointer do
-		local len = #Threads
-		if len == 0 then
-			local Thread = coroutinecreate(ReuseThread)
-			coroutineresume(Thread)
-			coroutineresume(Thread, Thread, Pointer[3], ...)
-		else
-			local Thread = Threads[len]
-			Threads[len] = nil
-			coroutineresume(Thread, Thread, Pointer[3], ...)
-		end
-		Pointer = Pointer[2]
-	end
-end
-
 const function errHandler(Error)
 	warn(`Error calling callback: {Error or "unknown error"}`)
 end
@@ -197,24 +174,6 @@ function SignalClass.FireSync(Signal: InternalSignal, ...)
 		Pointer[3](...)
 
 		Pointer = Pointer[2]
-	end
-end
-
-const function lateFire(Signal: InternalSignal, ...)
-	task.wait()
-	Signal:Fire(...)
-end
--- Fires all callbacks after a frame
-function SignalClass.FireLate(Signal: InternalSignal, ...)
-	local len = #Threads
-	if len == 0 then
-		local Thread = coroutinecreate(ReuseThread)
-		coroutineresume(Thread)
-		taskspawn(Thread, Thread, lateFire, Signal, ...)
-	else
-		local Thread = Threads[len]
-		Threads[len] = nil
-		taskspawn(Thread, Thread, lateFire, Signal, ...)
 	end
 end
 
@@ -257,14 +216,6 @@ function SignalClass.Once(Signal: InternalSignal, Callback)
 	return Connection
 end
 
-function SignalClass.ConnectParallel(Signal: InternalSignal, Callback)
-	return Connect(Signal, function(...)
-		desync()
-		Callback(...)
-		sync()
-	end)
-end
-
 function SignalClass.Wait(Signal: InternalSignal)
 	local Thread = coroutinerunning()
 
@@ -277,6 +228,22 @@ function SignalClass.Wait(Signal: InternalSignal)
 	end)
 
 	return coroutineyield()
+end
+
+function SignalClass.FilteredWait(Signal: InternalSignal, Filter: (...any) -> boolean?)
+	local Thread = coroutinerunning()
+	
+	local Connection: InternalConnection
+	Connection = Connect(Signal, function(...)
+		if Filter(...) then
+			Disconnect(Connection)
+			if coroutinestatus(Thread) == "suspended" then
+				taskspawn(Thread, ...)
+			end
+		end
+	end)
+
+	return coroutine.yield()
 end
 
 function SignalClass.SetId(Signal: InternalSignal, Id: any)
@@ -294,7 +261,7 @@ function SignalClass.GetConnections(Signal: InternalSignal)
 
 	local Pointer = Signal.Tail
 	while Pointer do
-		tableinsert(Connections, Pointer)
+		table.insert(Connections, Pointer)
 		Pointer = Pointer[2]
 	end
 	
@@ -320,7 +287,7 @@ function SignalClass.Destroy(Signal: InternalSignal)
 	end
 end
 
-const function CreateSignal(Id: any) : Signal<...any>
+const function CreateSignal(Id: any) : Signal
 	local Signal = setmetatable({}, SignalClass)
 	if Id then
 		Storage[Id] = Signal :: any
@@ -329,7 +296,7 @@ const function CreateSignal(Id: any) : Signal<...any>
 	return Signal :: any
 end
 
-const function GetSignal(Id: any) : Signal<...any>
+const function GetSignal(Id: any) : Signal
 	return Storage[Id]
 end
 
@@ -343,7 +310,7 @@ Module.Wrap = function<T...>(rbxSignal: RBXScriptSignal<T...>) : (Signal<T...>, 
 		Signal:Fire(...)
 	end)
 end
-Module.Is = function(Signal: any) : Signal<...any>|false
+Module.Is = function(Signal: any) : Signal|false
 	return type(Signal) == "table" and getmetatable(Signal) == SignalClass and Signal
 end
 
