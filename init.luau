@@ -304,6 +304,6 @@ end
 Module.SignalMT = SignalClass
 Module.ConnectionMT = ConnectionClass
 
-setmetatable(Module, {__call = Module.new})
+setmetatable(Module, {__call = function(self, Id: number) return CreateSignal(Id) end})
 
 return Module
