@@ -87,7 +87,7 @@ const function Disconnect(Connection: InternalConnection)
 	end
 end
 
-const Storage = {} :: { [any]: Signal }
+local Storage = {} :: {[any]: Signal}
 
 const SignalClass = {}
 SignalClass.__index = SignalClass
@@ -231,6 +231,22 @@ function SignalClass.Wait(Signal: InternalSignal, Filter: ((...any) -> boolean?)
 	end)
 
 	return coroutineyield()
+end
+
+function SignalClass.FilteredWait(Signal: InternalSignal, Filter: (...any) -> boolean?)
+	local Thread = coroutinerunning()
+	
+	local Connection: InternalConnection
+	Connection = Connect(Signal, function(...)
+		if Filter(...) then
+			Disconnect(Connection)
+			if coroutinestatus(Thread) == "suspended" then
+				taskspawn(Thread, ...)
+			end
+		end
+	end)
+
+	return coroutine.yield()
 end
 
 function SignalClass.SetId(Signal: InternalSignal, Id: any)
