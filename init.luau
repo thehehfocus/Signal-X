@@ -10,19 +10,18 @@ export type Signal<Params... = ...any> = {
 	Id: any,
 
 	--[[ Connect operations ]]--
-	Connect: (self: Signal<Params...>, Callback: (Params...) -> ()) -> Connection,
-	Once: (self: Signal<Params...>, Callback: (Params...) -> ()) -> Connection,
+	Connect: (self: Signal<Params...>, Callback: (Params...) -> ()) -> InternalConnection,
+	Disconnect: (Connection: InternalConnection) -> (),
+	Once: (self: Signal<Params...>, Callback: (Params...) -> ()) -> InternalConnection,
 	Wait: (self: Signal<Params...>, Filter: ((Params...) -> boolean?)?) -> Params...,
 
 	--[[ Fire operations ]]--
 	Fire: (self: Signal<Params...>, Params...) -> (),
 	FireSync: (self: Signal<Params...>, Params...) -> (),
 	FireDeferred: (self: Signal<Params...>, Params...) -> (),
-	FireProtected: (self: Signal<Params...>, ErrorHandler: (Error: string, Connection: Connection)->(), Params...) -> (),
+	FireProtected: (self: Signal<Params...>, Sync: boolean?, ErrorHandler: (Error: string)->(), Params...) -> (),
 
 	--[[ Utilities ]]--
-	SetId: (self: Signal<Params...>, Id: any) -> (),
-	GetConnections: (self: Signal<Params...>) -> {Connection},
 	DisconnectAll: (self: Signal<Params...>) -> (),
 	Destroy: (self: Signal<Params...>) -> (),
 }
@@ -31,46 +30,37 @@ type InternalSignal = {
 	Tail: InternalConnection?,
 } & Signal
 
-export type Connection = {
-	Signal: InternalSignal,	
-	Disconnect: (Connection: Connection) -> (),
-	Connected: boolean?
-}
+export type ConnectionResult = (Disconnect: nil) -> ()
 type InternalConnection = {
 	-- [1] Prev: InternalConnection?,
 	-- [2] Next: InternalConnection?,
 	-- [3] Callback: (...any)->(),
 	-- [4] Connected: boolean?,
-	-- [5] Signal: InternalSignal,
 	[number]: any
 }
 
--- Getting globals
-const taskspawn = task.spawn
-const taskdefer = task.defer
-const coroutinecreate = coroutine.create
-const coroutineresume = coroutine.resume
-const coroutinerunning = coroutine.running
-const coroutineyield = coroutine.yield
-const coroutinestatus = coroutine.status
-
 -- Pool
 const Threads = {} :: {thread}
+const ThreadLimit = 75
+
 const function ReuseCall(Thread, Callback, ...)
 	Callback(...)
-	table.insert(Threads, Thread)
+	
+	local len = #Threads
+	if len < ThreadLimit then
+		Threads[len + 1] = Thread
+	end
 end
 const function ReuseThread()
 	while true do
-		ReuseCall(coroutineyield())
+		ReuseCall(coroutine.yield())
 	end
 end
 
-const function Disconnect(Connection: InternalConnection)
+const function Disconnect(Signal: any, Connection: InternalConnection)
 	if not Connection[4] then return end
 	Connection[4] = nil
 
-	local Signal = Connection[5]
 	local Prev = Connection[1] :: InternalConnection?
 	local Next = Connection[2] :: InternalConnection?
 
@@ -87,7 +77,7 @@ const function Disconnect(Connection: InternalConnection)
 	end
 end
 
-local Storage = {} :: {[any]: Signal}
+const Storage = {} :: { [any]: Signal }
 
 const SignalClass = {}
 SignalClass.__index = SignalClass
@@ -110,13 +100,13 @@ function SignalClass.Fire(Signal: InternalSignal, ...)
 	while Pointer do
 		local len = #Threads
 		if len == 0 then
-			local Thread = coroutinecreate(ReuseThread)
-			coroutineresume(Thread)
-			taskspawn(Thread, Thread, Pointer[3], ...)
+			local Thread = coroutine.create(ReuseThread)
+			coroutine.resume(Thread)
+			task.spawn(Thread, Thread, Pointer[3], ...)
 		else
 			local Thread = Threads[len]
 			Threads[len] = nil
-			taskspawn(Thread, Thread, Pointer[3], ...)
+			task.spawn(Thread, Thread, Pointer[3], ...)
 		end
 		Pointer = Pointer[2]
 	end
@@ -128,39 +118,35 @@ function SignalClass.FireDeferred(Signal: InternalSignal, ...)
 	while Pointer do
 		local len = #Threads
 		if len == 0 then
-			local Thread = coroutinecreate(ReuseThread)
-			coroutineresume(Thread)
-			taskdefer(Thread, Thread, Pointer[3], ...)
+			local Thread = coroutine.create(ReuseThread)
+			coroutine.resume(Thread)
+			task.defer(Thread, Thread, Pointer[3], ...)
 		else
 			local Thread = Threads[len]
 			Threads[len] = nil
-			taskdefer(Thread, Thread, Pointer[3], ...)
+			task.defer(Thread, Thread, Pointer[3], ...)
 		end
 		Pointer = Pointer[2]
 	end
 end
 
 const function errHandler(Error)
-	warn(`Error calling callback: {Error or "unknown error"}`)
-end
-const function safeCall(Connection: InternalConnection, ErrorHandler, ...)
-	xpcall(Connection[3], ErrorHandler and function(Error)
-		ErrorHandler(Error, Connection)
-	end or errHandler, ...)
+	warn(`Error calling callback: {Error} \n {debug.traceback()}`)
 end
 -- Wraps callbacks in an xpcall
-function SignalClass.FireProtected(Signal: InternalSignal, ErrorHandler: ()->(), ...)
+function SignalClass.FireProtected(Signal: InternalSignal, Sync: boolean?, ErrorHandler, ...)
 	local Pointer = Signal.Tail
+
 	while Pointer do
 		local len = #Threads
 		if len == 0 then
-			local Thread = coroutinecreate(ReuseThread)
-			coroutineresume(Thread)
-			taskspawn(Thread, Thread, safeCall, Pointer, ErrorHandler, ...)
+			local Thread = coroutine.create(ReuseThread)
+			coroutine.resume(Thread)
+			task.spawn(Thread, Thread, xpcall, Pointer[3], ErrorHandler or errHandler, ...)
 		else
 			local Thread = Threads[len]
 			Threads[len] = nil
-			taskspawn(Thread, Thread, safeCall, Pointer, ErrorHandler, ...)
+			task.spawn(Thread, Thread, xpcall, Pointer[3], ErrorHandler or errHandler, ...)
 		end
 		Pointer = Pointer[2]
 	end
@@ -176,23 +162,15 @@ function SignalClass.FireSync(Signal: InternalSignal, ...)
 	end
 end
 
-local ConnectionClass = {
-	Connected = function(self: InternalConnection) return self[4] end,
-	Signal = function(self: InternalConnection) return self[5] end,
-	Disconnect = Disconnect,
-}
-ConnectionClass.__index = ConnectionClass
-
 const function Connect(Signal: InternalSignal, Callback) : InternalConnection
 	local Head = Signal.Head
 
-	local Connection = setmetatable({
+	local Connection = {
 		[1] = Head,
 		[2] = nil,
 		[3] = Callback,
 		[4] = true,
-		[5] = Signal,
-	}, ConnectionClass) :: InternalConnection
+	} :: InternalConnection
 
 	if Head then
 		Head[2] = Connection
@@ -203,12 +181,13 @@ const function Connect(Signal: InternalSignal, Callback) : InternalConnection
 
 	return Connection
 end
-SignalClass.Connect = Connect 
+SignalClass.Connect = Connect
+SignalClass.Disconnect = Disconnect
 
 function SignalClass.Once(Signal: InternalSignal, Callback)
 	local Connection : InternalConnection
 	Connection = Connect(Signal, function()
-		Disconnect(Connection)
+		Disconnect(Signal, Connection)
 		Callback()
 	end)
 
@@ -216,7 +195,7 @@ function SignalClass.Once(Signal: InternalSignal, Callback)
 end
 
 function SignalClass.Wait(Signal: InternalSignal, Filter: ((...any) -> boolean?)?)
-	local Thread = coroutinerunning()
+	local Thread = coroutine.running()
 
 	local Connection: InternalConnection
 	Connection = Connect(Signal, function(...)
@@ -224,51 +203,13 @@ function SignalClass.Wait(Signal: InternalSignal, Filter: ((...any) -> boolean?)
 			return
 		end
 
-		Disconnect(Connection)
-		if coroutinestatus(Thread) == "suspended" then
-			taskspawn(Thread, ...)
-		end
-	end)
-
-	return coroutineyield()
-end
-
-function SignalClass.FilteredWait(Signal: InternalSignal, Filter: (...any) -> boolean?)
-	local Thread = coroutinerunning()
-	
-	local Connection: InternalConnection
-	Connection = Connect(Signal, function(...)
-		if Filter(...) then
-			Disconnect(Connection)
-			if coroutinestatus(Thread) == "suspended" then
-				taskspawn(Thread, ...)
-			end
+		Disconnect(Signal, Connection)
+		if coroutine.status(Thread) == "suspended" then
+			task.spawn(Thread, ...)
 		end
 	end)
 
 	return coroutine.yield()
-end
-
-function SignalClass.SetId(Signal: InternalSignal, Id: any)
-	local oldId = Signal.Id
-	if oldId and Storage[oldId] == Signal then
-		Storage[oldId] = nil
-	end
-
-	Signal.Id = Id
-	Storage[Id] = Signal
-end
-
-function SignalClass.GetConnections(Signal: InternalSignal)
-	local Connections = {}
-
-	local Pointer = Signal.Tail
-	while Pointer do
-		table.insert(Connections, Pointer)
-		Pointer = Pointer[2]
-	end
-	
-	return Connections
 end
 
 function SignalClass.DisconnectAll(Signal: InternalSignal)
@@ -284,9 +225,9 @@ end
 function SignalClass.Destroy(Signal: InternalSignal)
 	Signal:DisconnectAll()
 	local Id = Signal.Id
-	if Id then
+	local InStorage = Id and Storage[Id]
+	if InStorage == Signal then
 		Storage[Id] = nil
-		Signal.Id = nil
 	end
 end
 
@@ -307,19 +248,13 @@ local Module = {}
 Module.new = CreateSignal
 Module.get = GetSignal
 
-Module.Wrap = function<T...>(rbxSignal: RBXScriptSignal<T...>) : (Signal<T...>, Connection)
+Module.Wrap = function<T...>(rbxSignal: RBXScriptSignal<T...>) : (Signal<T...>, ConnectionResult)
 	local Signal = CreateSignal()
 	return Signal::any, rbxSignal:Connect(function(...)
 		Signal:Fire(...)
 	end)
 end
-Module.Is = function(Signal: any) : Signal|false
-	return type(Signal) == "table" and getmetatable(Signal) == SignalClass and Signal
-end
 
 Module.SignalMT = SignalClass
-Module.ConnectionMT = ConnectionClass
-
-setmetatable(Module, {__call = function(self, Id: number) return CreateSignal(Id) end})
 
 return Module
